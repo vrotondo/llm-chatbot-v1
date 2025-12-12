@@ -1,6 +1,10 @@
 # HIDING FUTURE WORDS WITH CAUSAL ATTENTION
 
-from importlib.metadata import version
+# Disable CUDA to prevent hanging on import
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
+# from importlib.metadata import version  # Commented out - unused and causes timeout
 import torch
 import torch.nn as nn
 
@@ -68,8 +72,59 @@ attn_weights = torch.softmax(masked / keys.shape[-1]**0.5, dim=-1)
 # MASKING ADDITIONAL ATTENTION WEIGHTS WITH DROPOUT
 
 torch.manual_seed(123)
-dropout = torch.nn.Dropout(p=0.5) # dropout rate of 50%
+dropout = torch.nn.Dropout(0.5) # dropout rate of 50%
 example = torch.ones(6, 6) # create a matrix of ones
 
-print(dropout(example))
+#print(dropout(example))
+
+torch.manual_seed(123)
+#print(dropout(attn_weights))
+
+# IMPLEMENTING A COMPACT CAUSAL SELF-ATTENTION CLASS
+
+batch = torch.stack((inputs, inputs), dim=0)
+print(batch.shape) # 2 inputs with 6 tokens each, and each token has embedding dimension 3
+
+class CausalAttention(nn.Module):
+
+    def __init__(self, d_in, d_out, context_length,
+                 dropout, qkv_bias=False):
+        super().__init__()
+        self.d_out = d_out
+        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_key   = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.dropout = nn.Dropout(dropout) # New
+        self.register_buffer('mask', torch.triu(torch.ones(context_length, context_length), diagonal=1)) # New
+
+    def forward(self, x):
+        b, num_tokens, d_in = x.shape # New batch dimension b
+        # For inputs where `num_tokens` exceeds `context_length`, this will result in errors
+        # in the mask creation further below.
+        # In practice, this is not a problem since the LLM (chapters 4-7) ensures that inputs  
+        # do not exceed `context_length` before reaching this forward method. 
+        keys = self.W_key(x)
+        queries = self.W_query(x)
+        values = self.W_value(x)
+
+        attn_scores = queries @ keys.transpose(1, 2) # Changed transpose
+        attn_scores.masked_fill_(  # New, _ ops are in-place
+            self.mask.bool()[:num_tokens, :num_tokens], -torch.inf)  # `:num_tokens` to account for cases where the number of tokens in the batch is smaller than the supported context_size
+        attn_weights = torch.softmax(
+            attn_scores / keys.shape[-1]**0.5, dim=-1
+        )
+        attn_weights = self.dropout(attn_weights) # New
+
+        context_vec = attn_weights @ values
+        return context_vec
+
+torch.manual_seed(123)
+
+context_length = batch.shape[1]
+ca = CausalAttention(d_in, d_out, context_length, 0.0)
+
+context_vecs = ca(batch)
+
+print(context_vecs)
+print("context_vecs.shape:", context_vecs.shape)
 
